@@ -110,7 +110,7 @@ void Mem::emit() {
 		cell->parameters[ID::OFFSET] = Const(start_offset);
 		cell->parameters[ID::SIZE] = Const(size);
 		Const rd_wide_continuation, rd_clk_enable, rd_clk_polarity, rd_transparent;
-		Const wr_wide_continuation, wr_clk_enable, wr_clk_polarity;
+		Const wr_wide_continuation, wr_clk_enable, wr_clk_polarity, wr_priority_mask;
 		SigSpec rd_clk, rd_en, rd_addr, rd_data;
 		SigSpec wr_clk, wr_en, wr_addr, wr_data;
 		int abits = 0;
@@ -119,6 +119,11 @@ void Mem::emit() {
 		for (auto &port : wr_ports)
 			abits = std::max(abits, GetSize(port.addr));
 		cell->parameters[ID::ABITS] = Const(abits);
+		std::vector<int> wr_port_xlat;
+		for (int i = 0; i < GetSize(wr_ports); i++)
+			for (int j = 0; j < (1 << wr_ports[i].wide_log2); j++)
+				wr_port_xlat.push_back(i);
+
 		for (auto &port : rd_ports) {
 			// TODO: remove
 			log_assert(port.arst == State::S0);
@@ -169,6 +174,8 @@ void Mem::emit() {
 				wr_wide_continuation.bits.push_back(State(sub != 0));
 				wr_clk_enable.bits.push_back(State(port.clk_enable));
 				wr_clk_polarity.bits.push_back(State(port.clk_polarity));
+				for (auto idx : wr_port_xlat)
+					wr_priority_mask.bits.push_back(State(bool(port.priority_mask[idx])));
 				wr_clk.append(port.clk);
 				SigSpec addr = port.addr;
 				addr.extend_u0(abits, false);
@@ -184,10 +191,12 @@ void Mem::emit() {
 			wr_wide_continuation = State::S0;
 			wr_clk_enable = State::S0;
 			wr_clk_polarity = State::S0;
+			wr_priority_mask = State::S0;
 		}
 		cell->parameters[ID::WR_PORTS] = Const(GetSize(wr_clk));
 		cell->parameters[ID::WR_CLK_ENABLE] = wr_clk_enable;
 		cell->parameters[ID::WR_CLK_POLARITY] = wr_clk_polarity;
+		cell->parameters[ID::WR_PRIORITY_MASK] = wr_priority_mask;
 		cell->setPort(ID::WR_CLK, wr_clk);
 		cell->setPort(ID::WR_EN, wr_en);
 		cell->setPort(ID::WR_ADDR, wr_addr);
@@ -241,7 +250,8 @@ void Mem::emit() {
 			port.cell->parameters[ID::WIDTH] = width << port.wide_log2;
 			port.cell->parameters[ID::CLK_ENABLE] = port.clk_enable;
 			port.cell->parameters[ID::CLK_POLARITY] = port.clk_polarity;
-			port.cell->parameters[ID::PRIORITY] = idx++;
+			port.cell->parameters[ID::PORTID] = idx++;
+			port.cell->parameters[ID::PRIORITY_MASK] = port.priority_mask;
 			port.cell->setPort(ID::CLK, port.clk);
 			port.cell->setPort(ID::EN, port.en);
 			port.cell->setPort(ID::ADDR, port.addr);
@@ -390,11 +400,20 @@ namespace {
 				mwr.addr = cell->getPort(ID::ADDR);
 				mwr.data = cell->getPort(ID::DATA);
 				mwr.wide_log2 = ceil_log2(GetSize(mwr.data) / mem->width);
-				ports.push_back(std::make_pair(cell->parameters.at(ID::PRIORITY).as_int(), mwr));
+				ports.push_back(std::make_pair(cell->parameters.at(ID::PORTID).as_int(), mwr));
 			}
 			std::sort(ports.begin(), ports.end(), [](const std::pair<int, MemWr> &a, const std::pair<int, MemWr> &b) { return a.first < b.first; });
 			for (auto &it : ports)
 				res.wr_ports.push_back(it.second);
+			for (auto &port : res.wr_ports) {
+				Const orig_prio_mask = port.cell->parameters.at(ID::PRIORITY_MASK);
+				for (int i = 0; i < GetSize(res.wr_ports); i++) {
+					auto &other_port = res.wr_ports[i];
+					int other_portid = other_port.cell->parameters.at(ID::PORTID).as_int();
+					bool has_prio = other_portid < GetSize(orig_prio_mask) && orig_prio_mask[other_portid] == State::S1;
+					port.priority_mask.push_back(has_prio);
+				}
+			}
 		}
 		if (index.inits.count(mem->name)) {
 			std::vector<std::pair<int, MemInit>> inits;
@@ -415,20 +434,6 @@ namespace {
 			std::sort(inits.begin(), inits.end(), [](const std::pair<int, MemInit> &a, const std::pair<int, MemInit> &b) { return a.first < b.first; });
 			for (auto &it : inits)
 				res.inits.push_back(it.second);
-		}
-		for (int i = 0; i < GetSize(res.wr_ports); i++) {
-			auto &port = res.wr_ports[i];
-			port.priority_mask.resize(GetSize(res.wr_ports));
-			for (int j = 0; j < i; j++) {
-				auto &oport = res.wr_ports[j];
-				if (port.clk_enable != oport.clk_enable)
-					continue;
-				if (port.clk_enable && port.clk != oport.clk)
-					continue;
-				if (port.clk_enable && port.clk_polarity != oport.clk_polarity)
-					continue;
-				port.priority_mask[j] = true;
-			}
 		}
 		res.check();
 		return res;
@@ -484,30 +489,20 @@ namespace {
 			mrd.arst = State::S0;
 			res.rd_ports.push_back(mrd);
 		}
-		for (int i = 0; i < cell->parameters.at(ID::WR_PORTS).as_int(); i++) {
+		int n_wr_ports = cell->parameters.at(ID::WR_PORTS).as_int();
+		for (int i = 0; i < n_wr_ports; i++) {
 			MemWr mwr;
 			mwr.wide_log2 = 0;
 			mwr.clk_enable = cell->parameters.at(ID::WR_CLK_ENABLE).extract(i, 1).as_bool();
 			mwr.clk_polarity = cell->parameters.at(ID::WR_CLK_POLARITY).extract(i, 1).as_bool();
+			mwr.priority_mask.resize(n_wr_ports);
+			for (int j = 0; j < n_wr_ports; j++)
+				mwr.priority_mask[j] = cell->parameters.at(ID::WR_PRIORITY_MASK).extract(i * n_wr_ports + j, 1).as_bool();
 			mwr.clk = cell->getPort(ID::WR_CLK).extract(i, 1);
 			mwr.en = cell->getPort(ID::WR_EN).extract(i * res.width, res.width);
 			mwr.addr = cell->getPort(ID::WR_ADDR).extract(i * abits, abits);
 			mwr.data = cell->getPort(ID::WR_DATA).extract(i * res.width, res.width);
 			res.wr_ports.push_back(mwr);
-		}
-		for (int i = 0; i < GetSize(res.wr_ports); i++) {
-			auto &port = res.wr_ports[i];
-			port.priority_mask.resize(GetSize(res.wr_ports));
-			for (int j = 0; j < i; j++) {
-				auto &oport = res.wr_ports[j];
-				if (port.clk_enable != oport.clk_enable)
-					continue;
-				if (port.clk_enable && port.clk != oport.clk)
-					continue;
-				if (port.clk_enable && port.clk_polarity != oport.clk_polarity)
-					continue;
-				port.priority_mask[j] = true;
-			}
 		}
 		res.check();
 		return res;
