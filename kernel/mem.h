@@ -32,7 +32,7 @@ struct MemRd {
 	int wide_log2;
 	bool clk_enable, clk_polarity, ce_over_srst;
 	Const arst_value, srst_value, init_value;
-	bool transparent;
+	std::vector<bool> transparency_mask;
 	SigSpec clk, en, arst, srst, addr, data;
 	MemRd() : removed(false), cell(nullptr) {}
 };
