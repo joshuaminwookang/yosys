@@ -332,12 +332,23 @@ void Mem::check() {
 		log_assert(GetSize(port.init_value) == (width << port.wide_log2));
 		log_assert(GetSize(port.arst_value) == (width << port.wide_log2));
 		log_assert(GetSize(port.srst_value) == (width << port.wide_log2));
+		log_assert(GetSize(port.transparency_mask) == GetSize(wr_ports));
 		if (!port.clk_enable) {
+			log_assert(port.en == State::S1);
 			log_assert(port.arst == State::S0);
 			log_assert(port.srst == State::S0);
 		}
 		for (int j = 0; j < port.wide_log2; j++) {
 			log_assert(port.addr[j] == State::S0);
+		}
+		for (int i = 0; i < GetSize(wr_ports); i++) {
+			auto &wport = wr_ports[i];
+			if (port.transparency_mask[i] && !wport.removed) {
+				log_assert(port.clk_enable);
+				log_assert(wport.clk_enable);
+				log_assert(port.clk == wport.clk);
+				log_assert(port.clk_polarity == wport.clk_polarity);
+			}
 		}
 		max_wide_log2 = std::max(max_wide_log2, port.wide_log2);
 	}
