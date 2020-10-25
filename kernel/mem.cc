@@ -857,10 +857,73 @@ void Mem::emulate_priority(int idx1, int idx2)
 	port2.priority_mask[idx1] = false;
 }
 
+void Mem::emulate_transparency(int widx, int ridx) {
+	auto &wport = wr_ports[widx];
+	auto &rport = rd_ports[ridx];
+	log_assert(rport.transparency_mask[widx]);
+	// If other write ports have priority over this one, emulate their transparency too.
+	for (int i = GetSize(wr_ports) - 1; i > widx; i--)
+		if (wr_ports[i].priority_mask[widx])
+			emulate_transparency(i, ridx);
+	int min_wide_log2 = std::min(rport.wide_log2, wport.wide_log2);
+	int max_wide_log2 = std::max(rport.wide_log2, wport.wide_log2);
+	bool wide_write = wport.wide_log2 > rport.wide_log2;
+	SigSpec wdata_q = module->addWire(NEW_ID, GetSize(wport.data));
+	module->addDff(NEW_ID, rport.clk, wport.data, wdata_q, rport.clk_polarity);
+	for (int sub = 0; sub < (1 << max_wide_log2); sub += (1 << min_wide_log2)) {
+		SigSpec raddr = rport.addr;
+		SigSpec waddr = wport.addr;
+		for (int j = min_wide_log2; j < max_wide_log2; j++)
+			if (wide_write)
+				waddr[j] = State(sub >> j & 1);
+			else
+				raddr[j] = State(sub >> j & 1);
+		SigSpec addr_eq;
+		if (raddr != waddr)
+			addr_eq = module->Eq(NEW_ID, raddr, waddr);
+		int pos = 0;
+		int ewidth = width << min_wide_log2;
+		int wsub = wide_write ? sub : 0;
+		int rsub = wide_write ? 0 : sub;
+		SigSpec rdata_a = module->addWire(NEW_ID, ewidth);
+		while (pos < ewidth) {
+			int epos = pos;
+			while (epos < ewidth && wport.en[epos + wsub * width] == wport.en[pos + wsub * width])
+				epos++;
+			SigSpec cond;
+			if (raddr != waddr)
+				cond = module->And(NEW_ID, wport.en[pos + wsub * width], addr_eq);
+			else
+				cond = wport.en[pos + wsub * width];
+			SigSpec cond_q = module->addWire(NEW_ID);
+			module->addDff(NEW_ID, rport.clk, cond, cond_q, rport.clk_polarity);
+			SigSpec cur = rdata_a.extract(pos, epos-pos);
+			SigSpec other = wdata_q.extract(pos + wsub * width, epos-pos);
+			module->addMux(NEW_ID, cur, other, cond_q, rport.data.extract(pos + rsub * width, epos - pos));
+			pos = epos;
+		}
+		rport.data.replace(rsub * width, rdata_a);
+	}
+	rport.transparency_mask[widx] = false;
+}
+
 void Mem::prepare_wr_merge(int idx1, int idx2) {
 	log_assert(idx1 < idx2);
 	auto &port1 = wr_ports[idx1];
 	auto &port2 = wr_ports[idx2];
+	for (int i = 0; i < GetSize(rd_ports); i++) {
+		auto &rport = rd_ports[i];
+		if (rport.removed)
+			continue;
+		// If read port transparent with both write ports, it's fine.
+		if (rport.transparency_mask[idx1] && rport.transparency_mask[idx2])
+			continue;
+		// If transparent with only one, emulate it.
+		if (rport.transparency_mask[idx1])
+			emulate_transparency(i, idx1);
+		if (rport.transparency_mask[idx2])
+			emulate_transparency(i, idx2);
+	}
 	// If port 2 has priority over a port before port 1, make port 1 have priority too.
 	for (int i = 0; i < idx1; i++)
 		if (port2.priority_mask[i])
@@ -874,5 +937,37 @@ void Mem::prepare_wr_merge(int idx1, int idx2) {
 		auto &oport = wr_ports[i];
 		if (oport.priority_mask[idx2])
 			oport.priority_mask[idx1] = true;
+	}
+}
+
+void Mem::widen_prep(int wide_log2) {
+	// Make sure start_offset and size are aligned to the port width,
+	// adjust if necessary.
+	int mask = ((1 << wide_log2) - 1);
+	int delta = start_offset & mask;
+	start_offset -= delta;
+	size += delta;
+	if (size & mask) {
+		size |= mask;
+		size++;
+	}
+}
+
+void Mem::widen_wr_port(int idx, int wide_log2) {
+	widen_prep(wide_log2);
+	auto &port = wr_ports[idx];
+	log_assert(port.wide_log2 <= wide_log2);
+	if (port.wide_log2 < wide_log2) {
+		SigSpec sub_c = port.addr.extract(0, wide_log2);
+		log_assert(sub_c.is_fully_const());
+		int sub = sub_c.as_int();
+		port.addr.replace(port.wide_log2, Const(State::S0, wide_log2 - port.wide_log2));
+		SigSpec new_data = Const(State::Sx, width << wide_log2);
+		SigSpec new_en = Const(State::S0, width << wide_log2);
+		new_data.replace(width * sub, port.data);
+		new_en.replace(width * sub, port.en);
+		port.data = new_data;
+		port.en = new_en;
+		port.wide_log2 = wide_log2;
 	}
 }
