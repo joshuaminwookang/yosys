@@ -31,7 +31,7 @@ struct MemoryPass : public Pass {
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
-		log("    memory [-nomap] [-nordff] [-memx] [-bram <bram_rules>] [selection]\n");
+		log("    memory [-nomap] [-nordff] [-nowide] [-nosat] [-memx] [-bram <bram_rules>] [selection]\n");
 		log("\n");
 		log("This pass calls all the other memory_* passes in a useful order:\n");
 		log("\n");
@@ -39,7 +39,7 @@ struct MemoryPass : public Pass {
 		log("    memory_dff                          (skipped if called with -nordff or -memx)\n");
 		log("    opt_clean\n");
 		log("    opt_mem_feedback\n");
-		log("    memory_share\n");
+		log("    memory_share [-nowide] [-nosat]     (-memx implies -nowide)\n");
 		log("    memory_memx                         (when called with -memx)\n");
 		log("    opt_clean\n");
 		log("    memory_collect\n");
@@ -54,8 +54,11 @@ struct MemoryPass : public Pass {
 	{
 		bool flag_nomap = false;
 		bool flag_nordff = false;
+		bool flag_nowide = false;
+		bool flag_nosat = false;
 		bool flag_memx = false;
 		string memory_bram_opts;
+		string memory_share_opts;
 
 		log_header(design, "Executing MEMORY pass.\n");
 		log_push();
@@ -70,8 +73,17 @@ struct MemoryPass : public Pass {
 				flag_nordff = true;
 				continue;
 			}
+			if (args[argidx] == "-nowide") {
+				flag_nowide = true;
+				continue;
+			}
+			if (args[argidx] == "-nosat") {
+				flag_nosat = true;
+				continue;
+			}
 			if (args[argidx] == "-memx") {
 				flag_nordff = true;
+				flag_nowide = true;
 				flag_memx = true;
 				continue;
 			}
@@ -83,12 +95,17 @@ struct MemoryPass : public Pass {
 		}
 		extra_args(args, argidx, design);
 
+		if (flag_nowide)
+			memory_share_opts += " -nowide";
+		if (flag_nosat)
+			memory_share_opts += " -nosat";
+
 		Pass::call(design, "opt_mem");
 		if (!flag_nordff)
 			Pass::call(design, "memory_dff");
 		Pass::call(design, "opt_clean");
 		Pass::call(design, "opt_mem_feedback");
-		Pass::call(design, "memory_share");
+		Pass::call(design, "memory_share" + memory_share_opts);
 		if (flag_memx)
 			Pass::call(design, "memory_memx");
 		Pass::call(design, "opt_clean");
