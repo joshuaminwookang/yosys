@@ -1264,6 +1264,8 @@ void run_backend(std::string filename, std::string command, RTLIL::Design *desig
 			command = "cxxrtl";
 		else if (filename.size() > 4 && filename.compare(filename.size()-4, std::string::npos, ".aig") == 0)
 			command = "aiger";
+		else if (filename.size() > 4 && filename.compare(filename.size()-4, std::string::npos, ".gml") == 0)
+			command = "gml";
 		else if (filename.size() > 5 && filename.compare(filename.size()-5, std::string::npos, ".blif") == 0)
 			command = "blif";
 		else if (filename.size() > 5 && filename.compare(filename.size()-5, std::string::npos, ".edif") == 0)

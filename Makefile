@@ -54,7 +54,7 @@ SANITIZER =
 PROGRAM_PREFIX :=
 
 OS := $(shell uname -s)
-PREFIX ?= /usr/local
+PREFIX ?= /scratch/jmk/local
 INSTALL_SUDO :=
 ifneq ($(filter MINGW%,$(OS)),)
 OS := MINGW
